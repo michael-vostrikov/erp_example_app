@@ -116,6 +116,23 @@ async function routes (fastify, options) {
 
     return reply.send({ data: list });
   });
+
+
+  fastify.get('/api/load_price', async (request, reply) => {
+    let errors = await fastify.sequelize.transaction(async () => {
+      return await documentService.loadPrice('assets/files/price.csv');
+    })
+
+    return reply.send((errors.length ? { success: true, errors: errors } : { success: true }));
+  });
+
+  fastify.get('/api/delete_loaded_price', async (request, reply) => {
+    let errors = await fastify.sequelize.transaction(async () => {
+      return await documentService.deleteLoadedPrice();
+    })
+
+    return reply.send({ success: true });
+  });
 }
 
 module.exports = routes

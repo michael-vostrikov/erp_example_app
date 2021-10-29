@@ -2,6 +2,7 @@
 
 const ValidationError = require('../../src/ValidationError');
 const { Op } = require('sequelize');
+const csv = require('@fast-csv/parse');
 
 class DocumentService {
   constructor(sequelize) {
@@ -9,7 +10,7 @@ class DocumentService {
   }
 
   async init() {
-    const { DocumentType, ExchangeRate } = this.sequelize.models;
+    const { DocumentType, ExchangeRate, Currency } = this.sequelize.models;
 
     this.documentTypeMap = (await DocumentType.findAll()).indexBy('id');
     this.currencyMap = (await Currency.findAll()).reduce((res, currency) => {
@@ -240,6 +241,171 @@ class DocumentService {
     sqlDiscounts = 'WITH discount_cte AS (' + sqlDiscounts.slice(0, -1) + ') SELECT * FROM discount_cte WHERE rn = 1';
 
     return this.sequelize.query(sqlDiscounts).then((res) => res[0]);
+  }
+
+
+  async loadPrice(filename) {
+    const { PriceType, Price } = this.sequelize.models;
+
+    let rows = await this.getCsvRows(filename);
+
+    let priceDate = rows[0].name;
+    let errors = this._validateRows(rows);
+    if (errors.length > 0) {
+      return errors;
+    }
+    rows = rows.slice(2);
+
+
+    let priceTypeId = 4;
+    await PriceType.findOne({ where: { id: priceTypeId }, lock: true });
+
+    console.log(new Date(), 'start');
+
+    let manufacturerMap = await this._buildManufacturerMap(rows);
+    let materialMap = await this._buildMaterialMap(rows, manufacturerMap);
+
+    let materialIds = Object.values(materialMap).map((material) => material.id);
+    let existingPriceRecords = (await this._findPrices(materialIds, [priceTypeId], priceDate)).indexBy('material_id');
+
+    let priceRowsToUpdate = [];
+    let priceRowsToInsert = [];
+    for (let row of rows) {
+      let materialId = materialMap[row.name].id;
+
+      let priceRow = {
+        date: priceDate,
+        price_type_id: priceTypeId,
+        material_id: materialId,
+        price: row.price,
+        currency_id: this.currencyMap[row.currency].id,
+      };
+
+      let priceRecord = existingPriceRecords[materialId];
+      if (priceRecord !== undefined) {
+        // если последняя цена по материалу такая же, не добавляем запись на новую дату
+        let isSamePrice = priceRecord.price === row.price && priceRecord.currency_id === this.currencyMap[row.currency].id;
+        if (!isSamePrice) {
+          priceRowsToUpdate.push(priceRow);
+        }
+      } else {
+        priceRowsToInsert.push(priceRow);
+      }
+    }
+
+    console.log(new Date(), 'update', priceRowsToUpdate.length);
+    await Price.bulkCreate(priceRowsToUpdate, { updateOnDuplicate: ['price', 'currency'] });
+
+    console.log(new Date(), 'insert', priceRowsToInsert.length);
+    await Price.bulkCreate(priceRowsToInsert);
+
+    console.log(new Date(), 'complete', "\n");
+
+    return [];
+  }
+
+  async getCsvRows(filename) {
+    let rows = [];
+    await new Promise((resolve, reject) => {
+      csv.parseFile(filename, { delimiter: '\t', headers: ['name', 'manufacturer', 'price', 'currency'] })
+        .on('data', row => rows.push(row))
+        .on('error', error => reject(error))
+        .on('end', (rowCount) => resolve(rowCount));
+    });
+
+    return rows;
+  }
+
+  _validateRows(rows) {
+    let priceDate = rows[0].name;
+    if (!priceDate.match(/\d\d\d\d-\d\d-\d\d/)) {
+      return [{row: 1, errors: ['Неправильный формат даты']}];
+    }
+
+    let errors = [];
+    for (let rowIndex = 2; rowIndex < rows.length; rowIndex++) {
+      let row = rows[rowIndex];
+      let rowErrors = this._validateRow(row);
+
+      if (rowErrors.length > 0) {
+        errors.push({ row: rowIndex + 1, errors: rowErrors });
+
+        if (errors.length >= 100) {
+          break;
+        }
+      }
+    }
+
+    return errors;
+  }
+
+  _validateRow(row) {
+    let rowErrors = [];
+
+    let isPriceValid = (!isNaN(row.price) && parseFloat(row.price) >= 0);
+    if (!isPriceValid) {
+      rowErrors.push('Неправильно указана цена');
+    }
+    if (this.currencyMap[row.currency] === undefined) {
+      rowErrors.push('Неизвестная валюта');
+    }
+
+    return rowErrors;
+  }
+
+  async _buildManufacturerMap(rows) {
+    const { Organization } = this.sequelize.models;
+
+    let manufacturerNameList = rows.reduce((res, row) => {
+      return res.set(row.manufacturer, row.manufacturer);
+    }, new Map());
+
+    let manufacturerMap = (await Organization.findAll({
+      where: { name: [...manufacturerNameList.keys()], type: Organization.TYPE_MANUFACTURER },
+      lock: true,
+    })).indexBy('name');
+
+    let newManufacturerList = [...manufacturerNameList.values()]
+      .filter((name) => (manufacturerMap[name] === undefined))
+      .map((name) => ({ type: Organization.TYPE_MANUFACTURER, name: name }));
+
+    (await Organization.bulkCreate(newManufacturerList)).forEach((manufacturer) => {
+      manufacturerMap[manufacturer.name] = manufacturer;
+    });
+
+    return manufacturerMap;
+  }
+
+  async _buildMaterialMap(rows, manufacturerMap) {
+    const { Material } = this.sequelize.models;
+
+    let materialNameList = rows.reduce((res, row) => {
+      return res.set(row.name, { name: row.name, manufacturer: row.manufacturer });
+    }, new Map());
+
+    let materialMap = (await Material.findAll({
+      where: { name: [...materialNameList.keys()] },
+      lock: true,
+    })).indexBy('name');
+
+    let newMaterialList = [...materialNameList.values()]
+      .filter((data) => (materialMap[data.name] === undefined))
+      .map((data) => {
+        return { name: data.name, organization_id_manufacturer: manufacturerMap[data.manufacturer].id };
+      });
+
+    (await Material.bulkCreate(newMaterialList)).forEach((material) => {
+      materialMap[material.name] = material;
+    });
+
+    return materialMap;
+  }
+
+  async deleteLoadedPrice() {
+    const { materials_count } = require('../constants');
+    await this.sequelize.query("DELETE FROM prices WHERE price_type_id = 4");
+    await this.sequelize.query("DELETE FROM materials WHERE CONVERT(SUBSTRING(name, 7, CHAR_LENGTH(name) - 6), UNSIGNED INTEGER) >= " + (materials_count + 1));
+    await this.sequelize.query("DELETE FROM organizations WHERE name = 'Производитель 12'");
   }
 }
 

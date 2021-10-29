@@ -5,6 +5,8 @@ const {
 module.exports = (sequelize, DataTypes) => {
 
   class Organization extends Model {
+    static get TYPE_MANUFACTURER() { return 'manufacturer'; }
+
     static associate(models) {
       // define association here
     }

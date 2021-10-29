@@ -5,6 +5,10 @@ const {
 module.exports = function(sequelize, DataTypes) {
 
   class Currency extends Model {
+    static get RUB() { return 1; }
+    static get USD() { return 2; }
+    static get EUR() { return 3; }
+
     static associate(models) {
       // define association here
     }
