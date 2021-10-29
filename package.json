@@ -7,11 +7,13 @@
     "fastify": "^3.22.0",
     "fastify-plugin": "^3.0.0",
     "mysql2": "^2.3.2",
+    "sequelize": "^6.7.0",
     "sequelize-fastify": "^1.0.9"
   },
   "devDependencies": {},
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "init-app": "node init-app.js",
     "app": "node app.js"
   },
   "author": "",

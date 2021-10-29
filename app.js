@@ -1,5 +1,17 @@
 const fastify = require('fastify')({ logger: false})
 
+
+fastify.register(
+  require('sequelize-fastify'),
+  {
+    instance: 'sequelize',
+    sequelizeOptions: require('./config/sequelize'),
+  }
+)
+
+fastify.register(require('./models/models'))
+
+
 fastify.register(require('./config/routes'))
 
 fastify.listen(process.env.PORT, '0.0.0.0', function (err, address) {
