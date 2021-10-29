@@ -15,6 +15,14 @@ Object.defineProperty(Array.prototype, 'indexBy', {
   }
 });
 
+Object.defineProperty(Date.prototype, 'getYmd', {
+  value: function () {
+    return this.getFullYear()
+      + '-' + ((this.getMonth() < 9 ? '0' : '') + (this.getMonth() + 1))
+      + '-' + (this.getDate() < 10 ? '0' + this.getDate() : this.getDate());
+  }
+});
+
 fastify.register(
   require('sequelize-fastify'),
   {

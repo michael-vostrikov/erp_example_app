@@ -56,6 +56,66 @@ async function routes (fastify, options) {
       return reply.send({ success: true });
     });
   });
+
+
+  const getMaterialsSchema = {
+    querystring: {
+      type: 'object',
+      required: ['document_id'],
+      properties: {
+        document_id: { oneOf: [
+            { type: 'string', enum: ['random'] },
+            { type: 'integer' },
+          ] },
+        term: { type: 'string' },
+        limit_stock: { type: 'integer', enum: [0, 1] },
+        offset: { type: 'integer', minimum: 0 },
+      }
+    }
+  };
+
+  fastify.get('/api/materials_price_current_stock', { schema: getMaterialsSchema }, async (request, reply) => {
+    let id = request.query.document_id;
+    let term = request.query.term;
+    let limitStock = request.query.limit_stock;
+    let offset = request.query.offset;
+
+    if (id === 'random') {
+      // use maximum that is more than exists in database to trigger 404 sometimes
+      id = randomInt(1, documents_count * 1.01);
+
+      if (!term) {
+        term = '';
+        let testStr = 'Товар1234567890 asdf';
+        if (Math.random() < 0.5) {
+          term = testStr.charAt(randomInt(0, testStr.length - 1));
+        }
+      }
+
+      if (!limitStock) {
+        limitStock = randomInt(0, 1);
+      }
+
+      if (!offset) {
+        offset = 0;
+      }
+    } else {
+      term = term ?? '';
+      limitStock = parseInt(limitStock ?? 0);
+      offset = parseInt(offset ?? 0);
+    }
+
+    let limit = 100;
+
+    let document = await Document.findOne({ where: { id: id } });
+    if (document === null) {
+      return reply.code(404).send({error: 'Document not found'});
+    }
+
+    let list = await documentService.getMaterialsPriceCurrentStock(document, term, limitStock, offset, limit);
+
+    return reply.send({ data: list });
+  });
 }
 
 module.exports = routes

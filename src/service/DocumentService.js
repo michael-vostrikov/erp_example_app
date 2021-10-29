@@ -1,6 +1,7 @@
 'use strict';
 
 const ValidationError = require('../../src/ValidationError');
+const { Op } = require('sequelize');
 
 class DocumentService {
   constructor(sequelize) {
@@ -8,9 +9,61 @@ class DocumentService {
   }
 
   async init() {
-    const { DocumentType } = this.sequelize.models;
+    const { DocumentType, ExchangeRate } = this.sequelize.models;
 
     this.documentTypeMap = (await DocumentType.findAll()).indexBy('id');
+    this.currencyMap = (await Currency.findAll()).reduce((res, currency) => {
+      res[currency.abbr] = currency;
+      res[currency.id] = currency;
+      return res;
+    }, {});
+
+    this.queryGenerator = (await this.sequelize.getQueryInterface()).queryGenerator;
+
+    let exchangeRateList = await ExchangeRate.findAll({ order: ['currency_id', 'date'] });
+    let exchangeRateListByCurrency = {};
+    for (let exchangeRate of exchangeRateList) {
+      if (exchangeRateListByCurrency[exchangeRate.currency_id] === undefined) {
+        exchangeRateListByCurrency[exchangeRate.currency_id] = [];
+      }
+      exchangeRateListByCurrency[exchangeRate.currency_id].push(exchangeRate);
+    }
+
+    // курсы валют это небольшое количество данных, можно держать в приложении данные на каждый день
+
+    let exchangeRateMap = {};
+    for (let [currencyId, currencyRateList] of Object.entries(exchangeRateListByCurrency)) {
+      // используем Map, так как он сохраняет порядок добавления элементов
+      let map = new Map();
+
+      for (let i = 0; i < currencyRateList.length; i++) {
+        let exchangeRate = currencyRateList[i];
+        let nextExchangeRate = currencyRateList[i + 1];
+
+        let dateParts = exchangeRate.date.split('-');
+        dateParts[1]--;
+        let currentDate = new Date(...dateParts);
+
+        let endDateStr;
+        if (nextExchangeRate === undefined) {
+          let endDate = (new Date(...dateParts));
+          endDate.setDate(endDate.getDate() + 1);
+          endDateStr = endDate.getYmd();
+        } else {
+          endDateStr = nextExchangeRate.date;
+        }
+
+        do {
+          map.set(currentDate.getYmd(), exchangeRate.value);
+
+          currentDate.setDate(currentDate.getDate() + 1);
+        } while (currentDate.getYmd() < endDateStr);
+      }
+
+      exchangeRateMap[currencyId] = map;
+    }
+
+    this.exchangeRateMap = exchangeRateMap;
   }
 
 
@@ -64,6 +117,129 @@ class DocumentService {
 
     document.closed = (closingType === -1 ? 0 : 1);
     await document.save();
+  }
+
+
+  async getMaterialsPriceCurrentStock(document, term, limitStock, offset, limit) {
+    const { CurrentStock, Material, ClientMaterialPrice, ClientManufacturerPrice, ClientPrice } = this.sequelize.models;
+
+    let filter = {
+      organization_id_address: document.organization_id_address,
+      organization_id_ur: document.organization_id_ur,
+      '$Material.name$': { [Op.like]: '%' + term + '%' },
+    };
+    if (limitStock) {
+      filter.cnt = { [Op.gt]: this.sequelize.col('reserve') };
+    }
+
+    let stocks = (await CurrentStock.findAll({
+      include: [Material], where: filter, limit: limit, offset: offset,
+      order: [
+        [this.sequelize.where(this.sequelize.col('Material.name'), { [Op.like]: term + '%' }), 'DESC'],
+        this.sequelize.col('Material.name')
+      ],
+    })).indexBy('material_id');
+
+    let materialIds = Object.keys(stocks);
+    if (materialIds.length === 0) {
+      return [];
+    }
+
+
+    let manufacturerIds = materialIds.map((materialId) => stocks[materialId].Material.organization_id_manufacturer);
+    let clientId = document.organization_id_client;
+    let date = document.date;
+
+    let [res1, res2, res3] = await Promise.all([
+      ClientMaterialPrice.findAll({
+        where: { organization_id_client: clientId, material_id: materialIds },
+      }),
+      ClientManufacturerPrice.findAll({
+        where: { organization_id_client: clientId, organization_id_manufacturer: manufacturerIds },
+      }),
+      ClientPrice.findOne({
+        where: { organization_id_client: clientId },
+      }),
+    ]);
+
+    let clientPriceListByMaterial = res1.indexBy('material_id');
+    let clientPriceListByManufacturer = res2.indexBy('organization_id_manufacturer');
+    let clientPriceCommon = res3;
+
+    let clientPricesByMaterial = {};
+    let priceTypeIds = {};
+    for (let materialId of materialIds) {
+      let manuacturerId = stocks[materialId].Material.organization_id_manufacturer;
+      let clientPrice = clientPriceListByMaterial[materialId]
+        ?? clientPriceListByManufacturer[manuacturerId]
+        ?? clientPriceCommon;
+
+      clientPricesByMaterial[materialId] = clientPrice;
+      priceTypeIds[clientPrice.price_type_id] = clientPrice.price_type_id;
+    }
+    priceTypeIds = Object.values(priceTypeIds);
+
+
+    let [priceRecordMap, promoDiscountMap] = await Promise.all([
+      this._findPrices(materialIds, priceTypeIds, date),
+      this._findDiscounts(materialIds, priceTypeIds, date),
+    ]);
+    priceRecordMap = priceRecordMap.indexBy((row) => row.material_id + '_' + row.price_type_id);
+    promoDiscountMap = promoDiscountMap.indexBy((row) => row.material_id + '_' + row.price_type_id);
+
+    let result = [];
+    for (let materialId of materialIds) {
+      let clientPrice = clientPricesByMaterial[materialId];
+      let priceTypeId = clientPrice.price_type_id;
+      let priceRecord = priceRecordMap[materialId + '_' + priceTypeId];
+      let promoDiscount = promoDiscountMap[materialId + '_' + priceTypeId] ?? null;
+
+      let exchangeRateValue = (priceRecord.currency_id === 1 ? 1
+        // если данные на заданную дату отсутствуют, значит дата больше последней записи, берем последнюю ставку
+        : this.exchangeRateMap[priceRecord.currency_id].get(date.getYmd()) ?? [...this.exchangeRateMap[priceRecord.currency_id].values()].pop()
+      );
+
+      let coefficient = (1 - Math.max(clientPrice.coefficient, (promoDiscount ? promoDiscount.coefficient : 0)));
+      let materialPrice = priceRecord.price * exchangeRateValue * coefficient;
+
+      let stock = stocks[materialId];
+      result.push({
+        id: materialId, name: stock.Material.name, cnt: stock.cnt,
+        price: materialPrice.toFixed(2), currency: this.currencyMap[priceRecord.currency_id].abbr,
+      });
+    }
+
+    return result;
+  }
+
+  _findPrices(materialIds, priceTypeIds, date) {
+    const { Price } = this.sequelize.models;
+
+    let sqlPrices = this.queryGenerator.selectQuery(Price.tableName, {
+      attributes: [
+        this.sequelize.literal('*'),
+        this.sequelize.literal('ROW_NUMBER() OVER (PARTITION BY material_id, price_type_id ORDER BY date DESC) AS rn'),
+      ],
+      where: { material_id: materialIds, price_type_id: priceTypeIds, date: { [Op.lte]: date } },
+    }, null);
+    sqlPrices = 'WITH prices_cte AS (' + sqlPrices.slice(0, -1) + ') SELECT * FROM prices_cte WHERE rn = 1';
+
+    return this.sequelize.query(sqlPrices).then((res) => res[0]);
+  }
+
+  _findDiscounts(materialIds, priceTypeIds, date) {
+    const { PromoDiscount } = this.sequelize.models;
+
+    let sqlDiscounts = this.queryGenerator.selectQuery(PromoDiscount.tableName, {
+      attributes: [
+        this.sequelize.literal('*'),
+        this.sequelize.literal('ROW_NUMBER() OVER (PARTITION BY material_id, price_type_id ORDER BY beg_date DESC) AS rn'),
+      ],
+      where: { material_id: materialIds, price_type_id: priceTypeIds, beg_date: { [Op.lte]: date } },
+    }, null);
+    sqlDiscounts = 'WITH discount_cte AS (' + sqlDiscounts.slice(0, -1) + ') SELECT * FROM discount_cte WHERE rn = 1';
+
+    return this.sequelize.query(sqlDiscounts).then((res) => res[0]);
   }
 }
 
