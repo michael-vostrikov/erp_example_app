@@ -3,9 +3,13 @@
 const fs = require('fs');
 const path = require('path');
 const Sequelize = require('sequelize');
+const cls = require('cls-hooked');
 
 async function initModels(fastify)
 {
+  const namespace = cls.createNamespace('sequelize');
+  Sequelize.useCLS(namespace);
+
   let sequelize = fastify.sequelize;
 
   const db = {};

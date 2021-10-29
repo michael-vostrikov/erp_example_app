@@ -4,6 +4,7 @@
   "description": "",
   "main": "app.js",
   "dependencies": {
+    "cls-hooked": "^4.2.2",
     "fastify": "^3.22.0",
     "fastify-plugin": "^3.0.0",
     "mysql2": "^2.3.2",

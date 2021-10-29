@@ -1,5 +1,19 @@
 const fastify = require('fastify')({ logger: false})
+const ValidationError = require('./src/ValidationError')
 
+Object.defineProperty(Array.prototype, 'indexBy', {
+  value: function (field) {
+    let map = {};
+    for (let el of this) {
+      if (el !== undefined && el !== null) {
+        let fieldValue = (typeof(field) === 'function' ? field(el) : el[field]);
+        map[fieldValue] = el;
+      }
+    }
+
+    return map;
+  }
+});
 
 fastify.register(
   require('sequelize-fastify'),
@@ -13,6 +27,18 @@ fastify.register(require('./models/models'))
 
 
 fastify.register(require('./config/routes'))
+
+fastify.setErrorHandler(function (error, request, reply) {
+  if (error instanceof ValidationError) {
+    reply.status(400).send({error: error.message});
+  } else {
+    if (! (error.parent && error.parent.code === 'ER_SIGNAL_EXCEPTION' || error.code === 'ER_SIGNAL_EXCEPTION')) {
+      console.log(error);
+    }
+
+    reply.status(500).send({error: 'Internal server error'});
+  }
+})
 
 fastify.listen(process.env.PORT, '0.0.0.0', function (err, address) {
   if (err) {

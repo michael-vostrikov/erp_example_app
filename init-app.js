@@ -38,9 +38,9 @@ async function init()
 
   await createDatabase();
 
-  const sql = 'SELECT * FROM documents LIMIT 1';
+  const sql = 'SHOW TABLES LIKE "documents"';
   let [res] = await fastify.sequelize.query(sql);
-  if (res.length > 0) {
+  if (res.length === 0) {
     let initModels = require('./models/models');
     await initModels(fastify);
 

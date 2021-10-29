@@ -5,6 +5,9 @@ const {
 module.exports = (sequelize, DataTypes) => {
 
   class DocumentType extends Model {
+    static get ZPS() { return 6; }
+    static get PLAN_PROIZVODSTVA() { return 8; }
+
     static associate(models) {
       // define association here
     }

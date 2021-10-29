@@ -1,5 +1,9 @@
 'use strict';
 
+const { DatabaseError } = require('sequelize/lib/errors');
+const { Transaction, Sequelize } = require('sequelize');
+const ValidationError = require('./ValidationError');
+
 async function insertByN(queryInterface, tableName, totalCount, recordCallback, N) {
   N = N || 10000;
 
@@ -37,8 +41,64 @@ function substractDays(days, startDate) {
   return date;
 }
 
+
+async function executeWithRetry(actionCallback, errorCallback)
+{
+  let tryNumber = 0;
+  while (true) {
+    try {
+      let res = await actionCallback();
+      return res;
+
+    } catch (error) {
+      tryNumber++;
+      let needContinue = await errorCallback(error, tryNumber);
+      if (needContinue) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+}
+
+async function runInTransaction(sequelize, actionCallback, maxTryNumber)
+{
+  maxTryNumber = maxTryNumber || 10;
+
+  return Sequelize._clsRun(async () => {
+    let transaction = null;
+
+    return await executeWithRetry(async function () {
+      transaction = new Transaction(sequelize, undefined);
+      await transaction.prepareEnvironment();
+      const result = await actionCallback();
+      await transaction.commit();
+      return result;
+
+    }, async function (error, tryNumber) {
+      if (transaction && !transaction.finished) {
+        await transaction.rollback();
+      }
+      transaction = null;
+
+      if (error instanceof DatabaseError && error.parent && (error.parent.code === 'ER_LOCK_DEADLOCK' || error.parent.code === 'ER_LOCK_WAIT_TIMEOUT')) {
+        if (! (tryNumber <= maxTryNumber)) {
+          console.log(error);
+        }
+
+        return (tryNumber <= maxTryNumber);
+      }
+
+      return false;
+    });
+  });
+}
+
 module.exports = {
   insertByN,
   randomInt,
   substractDays,
+  executeWithRetry,
+  runInTransaction,
 };
